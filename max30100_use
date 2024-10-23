@@ -1,0 +1,480 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * File Name          : freertos.c
+  * Description        : Code for freertos applications
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2024 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "FreeRTOS.h"
+#include "task.h"
+#include "main.h"
+#include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "MPU6050.h"
+#include <stdio.h>
+#include "oled.h"
+#include "MAX30100_PulseOximeter.h"
+#include "MAX30100_Filters.h"
+#include "MAX30100.h"
+#include <complex.h>
+#include "event_groups.h"
+#include "queue.h"
+#include "semphr.h"
+#include "timers.h"
+#include "usart.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+EventGroupHandle_t eventGroup;
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+MPU6050_t mpu6050;
+char USART1_RXbuff;
+char RXBuffData[100];
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN Variables */
+
+/* USER CODE END Variables */
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+        .name = "defaultTask",
+        .stack_size = 128 * 4,
+        .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for MPUHandle */
+osThreadId_t MPUHandleHandle;
+const osThreadAttr_t MPUHandle_attributes = {
+        .name = "MPUHandle",
+        .stack_size = 128 * 4,
+        .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for MAXUsingHandler */
+osThreadId_t MAXUsingHandlerHandle;
+const osThreadAttr_t MAXUsingHandler_attributes = {
+        .name = "MAXUsingHandler",
+        .stack_size = 128 * 4,
+        .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for MPUERRORHandler */
+osThreadId_t MPUERRORHandlerHandle;
+const osThreadAttr_t MPUERRORHandler_attributes = {
+        .name = "MPUERRORHandler",
+        .stack_size = 128 * 4,
+        .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for OLEDShowHandle */
+osThreadId_t OLEDShowHandleHandle;
+const osThreadAttr_t OLEDShowHandle_attributes = {
+        .name = "OLEDShowHandle",
+        .stack_size = 128 * 4,
+        .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for MAXDataHandle */
+osTimerId_t MAXDataHandleHandle;
+const osTimerAttr_t MAXDataHandle_attributes = {
+        .name = "MAXDataHandle"
+};
+/* Definitions for MAXStart */
+osSemaphoreId_t MAXStartHandle;
+const osSemaphoreAttr_t MAXStart_attributes = {
+        .name = "MAXStart"
+};
+/* Definitions for MPU6050Event */
+osSemaphoreId_t MPU6050EventHandle;
+const osSemaphoreAttr_t MPU6050Event_attributes = {
+        .name = "MPU6050Event"
+};
+/* Definitions for OLEDShowSem */
+osSemaphoreId_t OLEDShowSemHandle;
+const osSemaphoreAttr_t OLEDShowSem_attributes = {
+        .name = "OLEDShowSem"
+};
+/* Definitions for TaskStaute */
+osEventFlagsId_t TaskStauteHandle;
+const osEventFlagsAttr_t TaskStaute_attributes = {
+        .name = "TaskStaute"
+};
+
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN FunctionPrototypes */
+#define BuffLenth 300
+int32_t Data[BuffLenth];
+int32_t smooth[BuffLenth];
+int stepNow;
+void smoothFilter(const int *data, int *smoothedData, int size, int windowSize);
+float HeartFre;
+int MpuErrorFlag;
+int SIMFlag = 0;
+/* USER CODE END FunctionPrototypes */
+
+void StartDefaultTask(void *argument);
+void MPURuning(void *argument);
+void MAXUsing(void *argument);
+void MPUERROR(void *argument);
+void OLEDShow(void *argument);
+void MAXData(void *argument);
+
+void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
+
+/**
+  * @brief  FreeRTOS initialization
+  * @param  None
+  * @retval None
+  */
+void MX_FREERTOS_Init(void) {
+    /* USER CODE BEGIN Init */
+
+    /* USER CODE END Init */
+
+    /* USER CODE BEGIN RTOS_MUTEX */
+    /* add mutexes, ... */
+    /* USER CODE END RTOS_MUTEX */
+
+    /* Create the semaphores(s) */
+    /* creation of MAXStart */
+    //创建并初始化一个信号量对象
+    MAXStartHandle = osSemaphoreNew(1, 0, &MAXStart_attributes);
+
+    /* creation of MPU6050Event */
+    MPU6050EventHandle = osSemaphoreNew(1, 0, &MPU6050Event_attributes);
+
+    /* creation of OLEDShowSem */
+    OLEDShowSemHandle = osSemaphoreNew(1, 0, &OLEDShowSem_attributes);
+
+    /* USER CODE BEGIN RTOS_SEMAPHORES */
+    /* add semaphores, ... */
+    /* USER CODE END RTOS_SEMAPHORES */
+
+    /* Create the timer(s) */
+    /* creation of MAXDataHandle
+     * 创建新的定时器*/
+    MAXDataHandleHandle = osTimerNew(MAXData, osTimerPeriodic, NULL, &MAXDataHandle_attributes);
+
+    /* USER CODE BEGIN RTOS_TIMERS */
+    /* start timers, add new ones, ... */
+    /* USER CODE END RTOS_TIMERS */
+
+    /* USER CODE BEGIN RTOS_QUEUES */
+    /* add queues, ... */
+    /* USER CODE END RTOS_QUEUES */
+
+    /* Create the thread(s) */
+    /* creation of defaultTask
+     * 创建新的任务*/
+    defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+    /* creation of MPUHandle */
+    MPUHandleHandle = osThreadNew(MPURuning, NULL, &MPUHandle_attributes);
+
+    /* creation of MAXUsingHandler */
+    MAXUsingHandlerHandle = osThreadNew(MAXUsing, NULL, &MAXUsingHandler_attributes);
+
+    /* creation of MPUERRORHandler */
+    MPUERRORHandlerHandle = osThreadNew(MPUERROR, NULL, &MPUERRORHandler_attributes);
+
+    /* creation of OLEDShowHandle */
+    OLEDShowHandleHandle = osThreadNew(OLEDShow, NULL, &OLEDShowHandle_attributes);
+
+    /* USER CODE BEGIN RTOS_THREADS */
+    /* add threads, ... */
+    osStatus_t status = osTimerStart(MAXDataHandleHandle, 15); // 检测到MAX30100开启检测
+    /* USER CODE END RTOS_THREADS */
+
+    /* Create the event(s) */
+    /* creation of TaskStaute */
+    TaskStauteHandle = osEventFlagsNew(&TaskStaute_attributes);
+
+    /* USER CODE BEGIN RTOS_EVENTS */
+    /* add events, ... */
+    /* USER CODE END RTOS_EVENTS */
+
+}
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.该任务是一个默认任务，主要用于系统初始化后的等待或其它低优先级操作。
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+    /* USER CODE BEGIN StartDefaultTask */
+    /* Infinite loop */
+    for(;;)
+    {
+        osDelay(100);
+    }
+    /* USER CODE END StartDefaultTask */
+}
+
+/* USER CODE BEGIN Header_MPURuning */
+/**
+* @brief Function implementing the MPUHandle thread.该任务从 MPU6050 传感器读取加速度数据，并通过条件判断处理步数计数逻辑。
+ * 当符合步数判断条件时，释放信号量以通知其它任务进行进一步处理。
+* @param argument: Not used
+* @retval None
+*/
+float x[3];
+int stepSum;
+/* USER CODE END Header_MPURuning */
+void MPURuning(void *argument)
+{
+    /* USER CODE BEGIN MPURuning */
+    /* Infinite loop */
+    for(;;)
+    {
+        MPU6050_ReadAccel(&mpu6050, x, x+1, x+2);
+        //printf("B:%.2f\r\n",x[2]);
+        if(x[1]>1.5&&x[1]!=1.9)
+        {
+            stepNow = stepSum;
+            xSemaphoreGive(MPU6050EventHandle);
+        }
+        if(x[1]>0.7)
+        {
+            stepSum++;
+        }
+        osDelay(10);
+    }
+    /* USER CODE END MPURuning */
+}
+
+/* USER CODE BEGIN Header_MAXUsing */
+/**
+* @brief Function implementing the MAXUsingHandler thread.负责处理 MAX30100 血氧仪的数据。该任务在等待信号量后，
+ * 处理采集到的血氧数据，进行平滑滤波和心率计算。计算完成后，更新心率数据并通过事件组标记心率异常。
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_MAXUsing */
+void MAXUsing(void *argument)
+{
+    /* USER CODE BEGIN MAXUsing */
+    /* Infinite loop */
+    for(;;)
+    {
+        if (xSemaphoreTake(MAXStartHandle,portMAX_DELAY)) {
+            xTimerStop(MAXDataHandleHandle,0);
+            smoothFilter(Data,smooth,BuffLenth,3);
+
+            int index;
+            float cot;
+            float sum;
+            float Heart;
+//				for(int i = 0;i<300;i++)
+//				{
+//					printf("A:%d\r\n",smooth[i]);
+//				}
+            for(int i = 0;i<300;i++)
+            {
+                if(smooth[i]>70&&smooth[i]<300)
+                {
+                    index = i;
+                    while(smooth[i]>0)
+                    {
+                        i++;
+                        if(i==BuffLenth-1)
+                        {
+                            break;
+                        }
+                    }
+                    while(smooth[i]<70)
+                    {
+                        i++;
+                        if(i==BuffLenth-1)
+                        {
+                            break;
+                        }
+                    }
+
+                    index = i-index;
+                    if(index>23)//23对应心率173认为误差
+                    {
+                        sum+= index;
+                        cot++;
+                        //printf("A:%d\r\n",index);
+                    }
+                }
+            }
+
+
+            Heart = (float)(sum/cot)*0.015;
+            Heart = 60/Heart;
+            HeartFre= Heart;
+            sum = 0;
+            cot = 0;
+            if((HeartFre>160&&HeartFre<250)||HeartFre<30)
+            {
+                xEventGroupSetBits(TaskStauteHandle,1<<0);//第0位置1
+            }
+            xSemaphoreGive(OLEDShowSemHandle);
+            xTimerStart(MAXDataHandleHandle,0);
+        }
+    }
+    /* USER CODE END MAXUsing */
+}
+
+/* USER CODE BEGIN Header_MPUERROR */
+/**
+* @brief Function implementing the MPUERRORHandler thread.该任务用于检测 MPU6050 加速度计的错误。通过检查步数变化，
+ * 如果步数计数不正常，设置事件组中的错误标志，并通知显示任务更新显示内容。
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_MPUERROR */
+void MPUERROR(void *argument)
+{
+    /* USER CODE BEGIN MPUERROR */
+    /* Infinite loop */
+    for(;;)
+    {
+        int flag = 1;
+        if (xSemaphoreTake(MPU6050EventHandle, portMAX_DELAY) == pdPASS)
+        {
+
+            for(int i = 0;i<200;i++)
+            {
+                //printf("A:%d\r\n",stepSum);
+                if((stepNow-stepSum)>2)
+                {
+                    flag = 0;
+                }
+                osDelay(10);
+            }
+            if(flag)
+            {
+                xEventGroupSetBits(TaskStauteHandle,1<<1);//第0位置1
+                xSemaphoreGive(OLEDShowSemHandle);
+            }
+        }
+        /* USER CODE END MPUERROR */
+    }
+}
+
+/* USER CODE BEGIN Header_OLEDShow */
+/**
+* @brief uFunction implementing the OLEDShowHandle thread.负责 OLED 屏幕的显示操作。
+ * 该任务会等待信号量，更新心率数据和异常状态显示。
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_OLEDShow */
+void OLEDShow(void *argument)
+{
+    /* USER CODE BEGIN OLEDShow */
+    char s[50];
+    /* Infinite loop */
+    for(;;)
+    {
+
+        if (xSemaphoreTake(OLEDShowSemHandle,portMAX_DELAY)) {
+            sprintf(s,"Heart:%.2f",HeartFre);
+            OLED_Clear();
+            OLED_ShowString(0,1,(unsigned char *)s,2);
+            EventBits_t Bits = xEventGroupGetBits(TaskStauteHandle);
+            if(Bits&1<<0)
+            {
+                //第0位异常，心率异常
+                sprintf(s,"Heart is Error");
+                OLED_ShowString(0,2,(unsigned char *)s,2);
+            }
+            if(Bits&1<<1)
+            {
+                //第1位异常，姿态异常
+                sprintf(s,"MPU Error");
+                OLED_ShowString(0,3,(unsigned char *)s,2);
+            }
+        }
+    }
+    /* USER CODE END OLEDShow */
+}
+
+/* MAXData function */
+void MAXData(void *argument)
+{
+    /* USER CODE BEGIN MAXData */
+    static int i = 0;
+    uint32_t DCRED;
+    update();
+    DCRED = -removeRedDcComponent(rawIRValue)*2;
+    Data[i++] = DCRED;
+    if(i==300)
+    {
+        xSemaphoreGive(MAXStartHandle);
+        i = 0;
+    }
+    /* USER CODE END MAXData */
+}
+
+/* Private application code --------------------------------------------------*/
+/* USER CODE BEGIN Application */
+/**
+ * @brief 该函数实现了一个简单的滑动窗口滤波器，用于对血氧数据进行平滑处理。它通过滑动窗口的平均值来减少数据中的噪声。
+ * @param data
+ * @param smoothedData
+ * @param size
+ * @param windowSize
+ */
+void smoothFilter(const int *data, int *smoothedData, int size, int windowSize) {
+    int sum;
+    int count;
+    if (windowSize <= 0 || windowSize >= size) {
+        // 无效的窗口大小，直接返回
+        return;
+    }
+
+    for (int i = 0; i < size; i++) {
+
+        sum = 0;
+        count = 0;
+        for (int j = i - windowSize / 2; j <= i + windowSize / 2; j++) {
+            if (j >= 0 && j < size) {
+                sum += data[j];
+                count++;
+            }
+        }
+
+        smoothedData[i] = sum / count;
+    }
+}
+int RXnum = 0;
+int S_Flag = 0;
+/**
+ * @brief  用于USART 中断回调函数，用于接收串口数据。当接收到数据后，再次开启接收中断等待下一个字节。
+ * @param huart
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+
+    HAL_UART_Receive_IT(&huart1,(void *)&USART1_RXbuff,1);
+}
+/* USER CODE END Application */
